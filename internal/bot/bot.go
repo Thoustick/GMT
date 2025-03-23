@@ -1,33 +1,31 @@
 package bot
 
 import (
+	"context"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers"
-	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
+	"github.com/Thoustick/GMT/internal/config"
+	"github.com/Thoustick/GMT/internal/tasks"
 	"github.com/Thoustick/GMT/pkg/logger"
 )
+type Bot struct {
+	bot          *gotgbot.Bot
+	cfg          *config.Config
+	log          logger.Logger
+	taskGen      tasks.TaskGenerator
+	dispatcher   *ext.Dispatcher
+	updater      *ext.Updater
+}
 
-func Init() error {
-	logger.InitLogger()
-
-	token, err := LoadConfig() 
-	if err != nil {
-		logger.Fatal(err, "failed to load config")
-		return err
-	}
-
-	// Создание нового бота
-	bot, err := gotgbot.NewBot(token, &gotgbot.BotOpts{
+func NewBot(cfg *config.Config, log logger.Logger, taskGen tasks.TaskGenerator) (*Bot, error) {
+	bot, err := gotgbot.NewBot(cfg.TelegramToken, &gotgbot.BotOpts{
 		BotClient: &gotgbot.BaseBotClient{
 			Client: http.Client{
-				Timeout: 10* time.Second,
+				Timeout: 10 * time.Second,
 			},
 			DefaultRequestOpts: &gotgbot.RequestOpts{
 				Timeout: gotgbot.DefaultTimeout,
@@ -36,15 +34,13 @@ func Init() error {
 		},
 	})
 	if err != nil {
-		logger.Fatal(err, "failed to create bot")
-		return err
+		log.Error("Failed to create bot", err, nil)
+		return nil, err
 	}
-	logger.Info("Bot started")
 
-	// Создание диспетчера с обработкой ошибок
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(b *gotgbot.Bot, ctx *ext.Context, err error) ext.DispatcherAction {
-			logger.Error(err, "error in dispatcher")
+			log.Error("Error in dispatcher", err, nil)
 			return ext.DispatcherActionNoop
 		},
 		MaxRoutines: ext.DefaultMaxRoutines,
@@ -52,10 +48,25 @@ func Init() error {
 
 	updater := ext.NewUpdater(dispatcher, nil)
 
-	dispatcher.AddHandler(handlers.NewMessage(message.Text, HandleMessage))
+	bh := NewHandler(taskGen, log)
 
-	// Запуск получения обновлений
-	err = updater.StartPolling(bot, &ext.PollingOpts{
+	dispatcher.AddHandler(handlers.NewCommand("start", bh.StartCommand))
+	dispatcher.AddHandler(handlers.NewCommand("task", bh.TaskCommand))
+
+	return &Bot{
+		bot:        bot,
+		cfg:        cfg,
+		log:        log,
+		taskGen:    taskGen,
+		dispatcher: dispatcher,
+		updater:    updater,
+	}, nil
+}
+
+func (b *Bot) Run() error {
+	b.log.Info("Bot started", nil)
+
+	err := b.updater.StartPolling(b.bot, &ext.PollingOpts{
 		DropPendingUpdates: true,
 		GetUpdatesOpts: &gotgbot.GetUpdatesOpts{
 			Timeout: 9,
@@ -65,20 +76,26 @@ func Init() error {
 		},
 	})
 	if err != nil {
-		logger.Fatal(err, "failed to start polling")
+		b.log.Error("Failed to start polling", err, nil)
 		return err
 	}
 
-	updater.Idle()
+	go b.updater.Idle()
 
-	logger.Info("Bot stopped")
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	return nil
+}
 
-	<-stop
-	logger.Info("Shutting down gracefully")
+func (b *Bot) Shutdown(ctx context.Context) error {
+	b.log.Info("Stopping bot gracefully ...", nil)
 
-	updater.Stop()
-	
+	b.updater.Stop()
+
+	select {
+	case <-time.After(2 * time.Second):
+		b.log.Info("Bot shutdown complete.", nil)
+	case <-ctx.Done():
+		b.log.Warn("Timeout reached, forcefully stopping bot.", nil)
+	}
+
 	return nil
 }

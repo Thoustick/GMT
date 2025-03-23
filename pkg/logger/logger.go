@@ -2,56 +2,75 @@ package logger
 
 import (
 	"os"
+	"strings"
 	"time"
 
-
+	"github.com/Thoustick/GMT/internal/config"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
-func InitLogger() {
-	// Загружаем конфигурацию
-	cfg, err := LoadConfig()
+// Logger — интерфейс логгирования, позволяющий легко заменять реализацию в тестах.
+type Logger interface {
+	Debug(msg string, fields map[string]interface{})
+	Info(msg string, fields map[string]interface{})
+	Error(msg string, err error, fields map[string]interface{})
+	Fatal(msg string, err error, fields map[string]interface{})
+	Warn(msg string, fields map[string]interface{})
+}
+
+// ZeroLogger — конкретная реализация Logger с использованием zerolog.
+type ZeroLogger struct {
+	logger zerolog.Logger
+}
+
+// InitLogger создает логгер с конфигурацией
+func InitLogger(cfg *config.Config) Logger {
+	level, err := zerolog.ParseLevel(strings.ToLower(cfg.LogLevel))
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to load config, using default values")
+		level = zerolog.InfoLevel
 	}
 
-	// Парсим уровень логирования
-	logLevel, err := zerolog.ParseLevel(cfg.LogLevel)
-	if err != nil {
-		log.Warn().Err(err).Msgf("Invalid log level: %s, defaulting to INFO", cfg.LogLevel)
-		logLevel = zerolog.InfoLevel
-	}
-
-	// Определяем writer для логов (консоль)
 	writer := zerolog.ConsoleWriter{
 		Out:        os.Stdout,
 		TimeFormat: time.RFC3339,
 	}
 
-	log.Logger = zerolog.New(writer).
-		Level(logLevel).
-		With().Timestamp().
+	zlog := zerolog.New(writer).
+		Level(level).
+		With().
+		Timestamp().
 		Logger()
 
-	// Устанавливаем глобальный уровень логирования
-	zerolog.SetGlobalLevel(logLevel)
+	zlog.Info().Msg("Логгер успешно инициализирован")
 
-	log.Info().Msg("Logger initialized successfully")
+	return &ZeroLogger{logger: zlog}
 }
 
-func Debug(msg string) {
-	log.Debug().Msg(msg)
+func (l *ZeroLogger) Info(msg string, fields map[string]interface{}) {
+	l.logger.Info().Fields(fields).Msg(msg)
 }
 
-func Info(msg string) {
-	log.Info().Msg(msg)
+func (l *ZeroLogger) Error(msg string, err error, fields map[string]interface{}) {
+	event := l.logger.Error().Fields(fields)
+	if err != nil {
+		event = event.Err(err)
+	}
+	event.Msg(msg)
 }
 
-func Error(err error, msg string) {
-	log.Error().Err(err).Msg(msg)
+func (l *ZeroLogger) Debug(msg string, fields map[string]interface{}) {
+	l.logger.Debug().Fields(fields).Msg(msg)
 }
 
-func Fatal(err error, msg string) {
-	log.Fatal().Err(err).Msg(msg)
+func (l *ZeroLogger) Warn(msg string, fields map[string]interface{}) {
+	l.logger.Warn().Fields(fields).Msg(msg)
+}
+
+func (l *ZeroLogger) Fatal(msg string, err error, fields map[string]interface{}) {
+	event := l.logger.Fatal().Fields(fields)
+	if err != nil {
+		event = event.Err(err)
+	}
+	event.Msg(msg)
+	os.Exit(1)
 }
